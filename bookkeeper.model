@@ -1,0 +1,172 @@
+/*
+ * Copyright (c) 2016, Salesforce.com, Inc.
+ * All rights reserved.
+ */
+
+type MaybeIndex : 0..9;
+type StrictIndex : 1..9;
+type NextIndex : 1..10;
+
+type LedgerId : 1..3;
+type ClientId : 1..2;
+type BookieId : 1..3;
+
+type Ensemble : Set<BookieId>[1..5];
+
+type LedgerMeta : record {
+  state : either {
+    Open,
+    Closed {
+      lac: MaybeIndex,
+    },
+  },
+  ensemble: Ensemble,
+};
+
+type ZooKeeper : record {
+  ledgers : Vector<LedgerMeta>[LedgerId],
+};
+
+var zooKeeper : ZooKeeper;
+
+type Entry : record {
+  // value omitted
+};
+
+type Ledger : record {
+  id: LedgerId,
+  entries: Vector<Entry>[StrictIndex],
+  lac: MaybeIndex,
+}
+
+type Bookie : record {
+  offline : Boolean,
+  ledgers : Vector<Ledger>[1..2],
+};
+
+var bookies: Array<Bookie>[BookieId];
+
+type Client : either {
+  Inactive,
+  Writer {
+    ledgerId : LedgerId,
+    ensemble : Vector<BookieId>[1..5],
+    lastEntry : Vector<MaybeIndex>[1..5],
+  },
+};
+
+var clients : Array<Client>[ClientId];
+
+type NodeId : either {
+  client {
+    id: ClientId,
+  },
+  bookie {
+    id: BookieId,
+  },
+  ZK,
+};
+
+type Message : record {
+  from: NodeId,
+  to: NodeId,
+  sentAt: Time,
+  deliverAt: Time,
+  payload: either {
+    AddEntryRequest,
+    AddEntryResponse,
+  },
+};
+
+var network : MultiSet<Message>[0..20];
+
+rule createLedger for client in clients {
+  match client {
+    Inactive {
+      if !full(zooKeeper.ledgers) {
+        var ensemble : Ensemble;
+        push(ensemble, 1);
+        push(ensemble, 2);
+        push(ensemble, 3);
+        push(zooKeeper.ledgers, LedgerMeta{
+          ensemble: ensemble,
+        });
+        var ledgerId : LedgerId = size(zooKeeper.ledgers);
+        var clientEnsemble : Vector<BookieId>[1..5];
+        var lastEntry : Vector<MaybeIndex>[1..5];
+        for bookieId in ensemble {
+          push(bookies[bookieId].ledgers, Ledger {
+            id: ledgerId,
+          });
+          push(clientEnsemble, bookieId);
+          push(lastEntry, 0);
+        }
+        client = Writer {
+          ledgerId: ledgerId,
+          ensemble: clientEnsemble,
+          lastEntry: lastEntry,
+        };
+      }
+    }
+    default {
+      // do nothing
+    }
+  }
+}
+
+function calculateLAC(lastEntry: Vector<MaybeIndex>[1..5]) -> MaybeIndex {
+  var lac : MaybeIndex = 0;
+  for index in lastEntry {
+    var count : 0..5;
+    for index2 in lastEntry {
+      if index2 >= index {
+        count += 1;
+      }
+    }
+    if count * 2 > size(lastEntry) && index > lac {
+      lac = index;
+    }
+  }
+  return lac;
+}
+
+rule addEntry
+for client in clients
+for bookieId, _ in bookies {
+  match client {
+    Writer(writer) {
+      for i, bookieId2 in writer.ensemble {
+        if bookieId != bookieId2 {
+          continue;
+        }
+        for ledger in bookies[bookieId].ledgers {
+          if ledger.id != writer.ledgerId {
+            continue;
+          }
+          push(ledger.entries, Entry{});
+          ledger.lac = calculateLAC(writer.lastEntry);
+          writer.lastEntry[i] += 1;
+          client = writer;
+        }
+      }
+    }
+    default {
+      // do nothing
+    }
+  }
+}
+
+rule closeLedger
+for client in clients {
+  match client {
+    Writer(writer) {
+      zooKeeper.ledgers[writer.ledgerId].state = Closed {
+        lac: calculateLAC(writer.lastEntry),
+      };
+      client = Inactive;
+    }
+    default {
+      // do nothing
+    }
+  }
+}

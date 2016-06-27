@@ -1,0 +1,21 @@
+{
+  "name": "runway-model-bookkeeper",
+  "version": "0.1.0",
+  "description": "Model of Apache BookKeeper for use in Runway",
+  "repository": {
+    "type": "git",
+    "url": ""
+  },
+  "keywords": [
+    "runway"
+  ],
+  "author": "Diego Ongaro <dongaro@salesforce.com>",
+  "license": "UNLICENSED",
+  "models": [
+    {
+      "id": "bookkeeper",
+      "label": "BookKeeper",
+      "spec": "bookkeeper.model",
+    }
+  ]
+}
