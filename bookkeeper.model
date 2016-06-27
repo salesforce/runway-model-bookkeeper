@@ -3,6 +3,8 @@
  * All rights reserved.
  */
 
+////////// Types and Variables //////////
+
 type MaybeIndex : 0..9;
 type StrictIndex : 1..9;
 type NextIndex : 1..10;
@@ -49,10 +51,12 @@ var bookies: Array<Bookie>[BookieId];
 
 type Client : either {
   Inactive,
+  CreatingLedger,
   Writer {
     ledgerId : LedgerId,
     ensemble : Vector<BookieId>[1..5],
     lastEntry : Vector<MaybeIndex>[1..5],
+    numEntries : MaybeIndex,
   },
   Recovering {
     ledgerId : LedgerId,
@@ -65,14 +69,19 @@ type Client : either {
 var clients : Array<Client>[ClientId];
 
 type NodeId : either {
-  client {
+  ClientNode {
     id: ClientId,
   },
-  bookie {
+  BookieNode {
     id: BookieId,
   },
-  ZK,
+  ZooKeeperNode,
 };
+
+type AddEntryResponseStatus : either {
+  AddEntryOk,
+  AddEntryFenced,
+}
 
 type Message : record {
   from: NodeId,
@@ -80,45 +89,41 @@ type Message : record {
   sentAt: Time,
   deliverAt: Time,
   payload: either {
-    AddEntryRequest,
-    AddEntryResponse,
+    CreateLedgerRequest,
+    CreateLedgerResponse {
+      ledgerId : LedgerId,
+      ensemble : Ensemble,
+    },
+    CloseLedgerRequest {
+      ledgerId : LedgerId,
+      lac : MaybeIndex,
+    },
+    ReadLedgerMetaRequest {
+      ledgerId : LedgerId,
+    },
+    ReadLedgerMetaResponse {
+      meta : LedgerMeta,
+    },
+    AddEntryRequest {
+      ledgerId : LedgerId,
+      entryId : StrictIndex,
+      lac : MaybeIndex,
+      recovery : Boolean,
+    },
+    AddEntryResponse {
+      status : AddEntryResponseStatus,
+    },
   },
 };
 
 var network : MultiSet<Message>[0..20];
 
-rule createLedger for client in clients {
-  match client {
-    Inactive {
-      if !full(zooKeeper.ledgers) {
-        var ensemble : Ensemble;
-        push(ensemble, 1);
-        push(ensemble, 2);
-        push(ensemble, 3);
-        push(zooKeeper.ledgers, LedgerMeta{
-          ensemble: ensemble,
-        });
-        var ledgerId : LedgerId = size(zooKeeper.ledgers);
-        var clientEnsemble : Vector<BookieId>[1..5];
-        var lastEntry : Vector<MaybeIndex>[1..5];
-        for bookieId in ensemble {
-          push(bookies[bookieId].ledgers, Ledger {
-            id: ledgerId,
-          });
-          push(clientEnsemble, bookieId);
-          push(lastEntry, 0);
-        }
-        client = Writer {
-          ledgerId: ledgerId,
-          ensemble: clientEnsemble,
-          lastEntry: lastEntry,
-        };
-      }
-    }
-    default {
-      // do nothing
-    }
-  }
+////////// Functions //////////
+
+function sendMessage(message: Message) {
+  message.sentAt = later(0);
+  message.deliverAt = later(urandomRange(10000, 20000));
+  push(network, message);
 }
 
 function calculateLAC(lastEntry: Vector<MaybeIndex>[1..5]) -> MaybeIndex {
@@ -137,27 +142,18 @@ function calculateLAC(lastEntry: Vector<MaybeIndex>[1..5]) -> MaybeIndex {
   return lac;
 }
 
-rule addEntry
-for client in clients
-for bookieId, _ in bookies {
+////////// Rules //////////
+
+// A client requests ZooKeeper to create a new ledger.
+rule sendCreateLedger for clientId, client in clients {
   match client {
-    Writer(writer) {
-      for i, bookieId2 in writer.ensemble {
-        if bookieId != bookieId2 {
-          continue;
-        }
-        for ledger in bookies[bookieId].ledgers {
-          if ledger.id == writer.ledgerId {
-            if !ledger.fenced {
-              push(ledger.entries, Entry{});
-              ledger.lac = calculateLAC(writer.lastEntry);
-              writer.lastEntry[i] += 1;
-              client = writer;
-            }
-            break;
-          }
-        }
-      }
+    Inactive {
+      client = CreatingLedger;
+      sendMessage(Message {
+        from: ClientNode { id: clientId },
+        to: ZooKeeperNode,
+        payload: CreateLedgerRequest,
+      });
     }
     default {
       // do nothing
@@ -165,18 +161,196 @@ for bookieId, _ in bookies {
   }
 }
 
-rule closeLedger
+// A client creates a new entry locally, to be replicated later.
+rule createEntry
 for client in clients {
   match client {
     Writer(writer) {
-      zooKeeper.ledgers[writer.ledgerId].state = Closed {
-        lac: calculateLAC(writer.lastEntry),
-      };
+      writer.numEntries += 1;
+      client = writer;
+    }
+    default {
+      // do nothing
+    }
+  }
+}
+
+// A client replicates an entry to a single bookie.
+rule sendEntry
+for clientId, client in clients
+for bookieId, _ in bookies {
+  match client {
+    Writer(writer) {
+      for i, bookieId2 in writer.ensemble {
+        if bookieId == bookieId2 {
+          if writer.lastEntry[i] < writer.numEntries {
+            sendMessage(Message {
+              from: ClientNode { id: clientId },
+              to: BookieNode { id: bookieId },
+              payload: AddEntryRequest {
+                ledgerId: writer.ledgerId,
+                entryId: writer.lastEntry[i] + 1,
+                lac: calculateLAC(writer.lastEntry),
+                recovery: False,
+              },
+            });
+          }
+          break;
+        }
+      }
+    }
+    default {
+      /* do nothing */
+    }
+  }
+}
+
+// A writer stops writing and closes its own ledger in ZooKeeper.
+rule sendCloseLedger
+for clientId, client in clients {
+  match client {
+    Writer(writer) {
+      sendMessage(Message {
+        from: ClientNode { id: clientId },
+        to: ZooKeeperNode,
+        payload: CloseLedgerRequest {
+          ledgerId: writer.ledgerId,
+          lac: calculateLAC(writer.lastEntry),
+        },
+      });
       client = Inactive;
     }
     default {
       // do nothing
     }
+  }
+}
+
+
+rule handleMessage for message in network {
+  if past(message.deliverAt) {
+    match message.to {
+
+      ClientNode(to) {
+        match message.payload {
+
+          CreateLedgerResponse(payload) {
+            var ensemble : Vector<BookieId>[1..5];
+            var lastEntry : Vector<MaybeIndex>[1..5];
+            for bookieId in payload.ensemble {
+              push(ensemble, bookieId);
+              push(lastEntry, 0);
+            }
+            clients[to.id] = Writer {
+              ledgerId: payload.ledgerId,
+              ensemble: ensemble,
+              lastEntry: lastEntry,
+            };
+          } // CreateLedgerResponse
+
+          AddEntryResponse(payload) {
+            match clients[to.id] {
+              Writer(writer) {
+                match payload.status {
+                  AddEntryOk {
+                    for i, bookieId in writer.ensemble {
+                      if BookieNode { id: bookieId } == message.from {
+                        writer.lastEntry[i] += 1;
+                        clients[to.id] = writer;
+                        break;
+                      }
+                    }
+                  }
+                  AddEntryFenced {
+                    clients[to.id] = Inactive;
+                  }
+                }
+              }
+              default { /* do nothing */ }
+            }
+          } // AddEntryResponse
+
+          default { assert False; } // other message types
+        }
+      } // to ClientNode
+
+      BookieNode(to) {
+        match message.payload {
+
+          AddEntryRequest(payload) {
+            var status : AddEntryResponseStatus = AddEntryOk;
+            var ledgerIdx : 0..2;
+            for i, ledger in bookies[to.id].ledgers {
+              if ledger.id == payload.ledgerId {
+                ledgerIdx = i;
+                break;
+              }
+            }
+            if ledgerIdx == 0 {
+              push(bookies[to.id].ledgers, Ledger {
+                id: payload.ledgerId,
+              });
+              ledgerIdx = size(bookies[to.id].ledgers);
+            }
+            if bookies[to.id].ledgers[ledgerIdx].fenced &&
+               !payload.recovery {
+              status = AddEntryFenced;
+            }
+            if status == AddEntryOk {
+              bookies[to.id].ledgers[ledgerIdx].lac = payload.lac;
+              if payload.entryId == size(bookies[to.id].ledgers[ledgerIdx].entries) + 1 {
+                push(bookies[to.id].ledgers[ledgerIdx].entries, Entry{});
+              }
+            }
+            sendMessage(Message {
+              from: message.to,
+              to: message.from,
+              payload: AddEntryResponse {
+                status: status,
+              },
+            });
+          } // AddEntryRequest
+
+          default { assert False; } // other message types
+        }
+      } // to BookieNode
+
+      ZooKeeperNode {
+        match message.payload {
+
+          CreateLedgerRequest {
+            if !full(zooKeeper.ledgers) {
+              var ensemble : Ensemble;
+              push(ensemble, 1);
+              push(ensemble, 2);
+              push(ensemble, 3);
+              push(zooKeeper.ledgers, LedgerMeta{
+                ensemble: ensemble,
+              });
+              var ledgerId : LedgerId = size(zooKeeper.ledgers);
+              sendMessage(Message {
+                from: message.to,
+                to: message.from,
+                payload: CreateLedgerResponse {
+                  ledgerId: ledgerId,
+                  ensemble: ensemble,
+                },
+              });
+            }
+          } // CreateLedgerRequest
+
+          CloseLedgerRequest(payload) {
+            zooKeeper.ledgers[payload.ledgerId].state = Closed {
+              lac: payload.lac,
+            };
+          } // CloseLedgerRequest
+
+          default { assert False; } // other message types
+        }
+      } // to ZooKeeperNode
+
+    }
+    remove(network, message);
   }
 }
 
@@ -241,6 +415,7 @@ for bookieId, _ in bookies {
     }
   } // client state
 }
+
 rule completeRecovery
 for client in clients {
   match client {
