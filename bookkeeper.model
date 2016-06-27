@@ -37,6 +37,7 @@ type Ledger : record {
   id: LedgerId,
   entries: Vector<Entry>[StrictIndex],
   lac: MaybeIndex,
+  fenced: Boolean,
 }
 
 type Bookie : record {
@@ -52,6 +53,12 @@ type Client : either {
     ledgerId : LedgerId,
     ensemble : Vector<BookieId>[1..5],
     lastEntry : Vector<MaybeIndex>[1..5],
+  },
+  Recovering {
+    ledgerId : LedgerId,
+    ensemble : Vector<BookieId>[1..5],
+    lastEntry : Vector<MaybeIndex>[1..5],
+    fenced : Vector<Boolean>[1..5],
   },
 };
 
@@ -140,13 +147,15 @@ for bookieId, _ in bookies {
           continue;
         }
         for ledger in bookies[bookieId].ledgers {
-          if ledger.id != writer.ledgerId {
-            continue;
+          if ledger.id == writer.ledgerId {
+            if !ledger.fenced {
+              push(ledger.entries, Entry{});
+              ledger.lac = calculateLAC(writer.lastEntry);
+              writer.lastEntry[i] += 1;
+              client = writer;
+            }
+            break;
           }
-          push(ledger.entries, Entry{});
-          ledger.lac = calculateLAC(writer.lastEntry);
-          writer.lastEntry[i] += 1;
-          client = writer;
         }
       }
     }
@@ -169,4 +178,92 @@ for client in clients {
       // do nothing
     }
   }
+}
+
+rule startRecovery
+for client in clients
+for ledgerId, _ in zooKeeper.ledgers {
+  match client {
+    Inactive {
+      match zooKeeper.ledgers[ledgerId].state {
+        Open {
+          var clientEnsemble : Vector<BookieId>[1..5];
+          var lastEntry : Vector<MaybeIndex>[1..5];
+          var fenced : Vector<Boolean>[1..5];
+          for bookieId in zooKeeper.ledgers[ledgerId].ensemble {
+            push(clientEnsemble, bookieId);
+            push(lastEntry, 0);
+            push(fenced, False);
+          }
+          client = Recovering {
+            ledgerId: ledgerId,
+            ensemble: clientEnsemble,
+            lastEntry: lastEntry,
+            fenced: fenced,
+          };
+        }
+        default {
+          /* do nothing */
+        }
+      } // zk ledger state
+    }
+    default {
+      // do nothing
+    }
+  } // client state
+}
+
+rule fence
+for client in clients
+for bookieId, _ in bookies {
+  match client {
+    Recovering(recovering) {
+      for i, bookieId2 in recovering.ensemble {
+        if bookieId != bookieId2 {
+          continue;
+        }
+        if recovering.fenced[i] {
+          break;
+        }
+        for ledger in bookies[bookieId].ledgers {
+          if ledger.id == recovering.ledgerId {
+            ledger.fenced = True;
+            recovering.lastEntry[i] = size(ledger.entries);
+            recovering.fenced[i] = True;
+            client = recovering;
+            break;
+          }
+        }
+      }
+    }
+    default {
+      // do nothing
+    }
+  } // client state
+}
+rule completeRecovery
+for client in clients {
+  match client {
+    Recovering(recovering) {
+      var count : 0..5;
+      var max : MaybeIndex;
+      for i, bookieId in recovering.ensemble {
+        if recovering.fenced[i] {
+          count += 1;
+          if recovering.lastEntry[i] > max {
+            max = recovering.lastEntry[i];
+          }
+        }
+      }
+      if count * 2 > size(recovering.ensemble) {
+        zooKeeper.ledgers[recovering.ledgerId].state = Closed {
+          lac: max,
+        };
+        client = Inactive;
+      }
+    }
+    default {
+      // do nothing
+    }
+  } // client state
 }
