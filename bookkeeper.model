@@ -181,6 +181,12 @@ function bookieGen() -> BookieId {
 
 ////////// Rules //////////
 
+// A client reboots.
+external rebootClient
+for client in clients {
+  client = Inactive;
+}
+
 // A client requests ZooKeeper to create a new ledger.
 external sendCreateLedger for clientId, client in clients {
   match client {
