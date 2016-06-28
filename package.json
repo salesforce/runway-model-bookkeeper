@@ -4,13 +4,13 @@
   "description": "Model of Apache BookKeeper for use in Runway",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "https://github.com/salesforce/runway-model-bookkeeper.git"
   },
   "keywords": [
     "runway"
   ],
   "author": "Diego Ongaro <dongaro@salesforce.com>",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "models": [
     {
       "id": "bookkeeper",
