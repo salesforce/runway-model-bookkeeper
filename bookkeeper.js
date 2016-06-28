@@ -67,17 +67,6 @@ let View = function(controller, svg, module) {
       .style('stroke', 'black');
   }
 
-  for (let id = 1; id <= numClients; ++id) {
-    let bbox = clientBBox(id);
-    svg.append('rect')
-      .attr('x', bbox.x)
-      .attr('y', bbox.y)
-      .attr('width', bbox.w)
-      .attr('height', bbox.h)
-      .style('fill', 'green')
-      .style('stroke', 'black');
-  }
-
   for (let id = 1; id <= numBookies; ++id) {
     let bbox = bookieBBox(id);
     svg.append('rect')
@@ -89,6 +78,10 @@ let View = function(controller, svg, module) {
       .style('stroke', 'black');
   }
 
+  let clientsG = svg
+    .append('g')
+      .attr('class', 'clients');
+
   let messagesG = svg
     .append('g')
       .attr('class', 'messages');
@@ -98,6 +91,48 @@ let View = function(controller, svg, module) {
     BookieNode: b => bookieBBox(b.id),
     ZooKeeperNode: zkBBox,
   });
+
+  let updateClients = changes => {
+    let clientsData = model.vars.get('clients').map(v => v);
+    let updateSel = clientsG
+      .selectAll('g.client')
+      .data(clientsData);
+    let enterSel = updateSel.enter()
+      .append('g')
+      .classed('client', true);
+    enterSel.append('rect');
+    updateSel.each(function(clientVar, i) {
+      let clientSel = d3.select(this);
+      let id = i + 1;
+      let bbox = clientBBox(id);
+      let rect = clientSel.select('rect')
+        .attr('x', bbox.x)
+        .attr('y', bbox.y)
+        .attr('width', bbox.w)
+        .attr('height', bbox.h)
+        .style('fill', clientVar.match({
+          Inactive: 'gray',
+          CreatingLedger: 'green',
+          Writer: 'green',
+          Recovering: 'yellow',
+        }))
+        .style('stroke', 'black')
+        .style('stroke-width', 'inherit')
+        .style('stroke-dasharray', 'none');
+      clientVar.match({
+        Writer: writer => {
+          let lac = model.functions.get('calculateLACWriter').evaluate(
+            [writer.lookup('ensemble')], model, [], {}).value;
+          let numEntries = writer.lookup('numEntries').value;
+          rect.style('stroke-width', '10');
+          if (numEntries > lac) {
+            rect.style('stroke-dasharray', '20, 15');
+          }
+        },
+      });
+    });
+  };
+  updateClients(['']);
 
   let updateMessages = changes => {
     let messageData = model.vars.get('network').map(v => v);
@@ -145,6 +180,7 @@ let View = function(controller, svg, module) {
     wideView: true,
     name: 'BookKeeperView',
     update: function(changes) {
+      updateClients(changes);
       updateMessages(changes);
     },
   };
