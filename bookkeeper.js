@@ -7,9 +7,11 @@
 
 let d3 = require('d3');
 let _ = require('lodash');
+let Menu = require('runway-browser/lib/menu.js');
 
 let View = function(controller, svg, module) {
   let model = module.env;
+  let menu = new Menu('bookkeeper', controller, model);
   svg = d3.select(svg)
     .classed('bookkeeper', true)
     .style('stroke-width', 5)
@@ -31,7 +33,7 @@ let View = function(controller, svg, module) {
   })();
 
   let clientBBox = id => {
-    let spacing = 200;
+    let spacing = 250;
     let bbox = {};
     bbox.y = midY;
     bbox.h = 100;
@@ -141,7 +143,7 @@ let View = function(controller, svg, module) {
       let ledgerUpdateSel = bookieSel
         .selectAll('text.ledger')
         .data(ledgerData);
-      let ledgerEnterSel = ledgerUpdateSel.enter()
+      ledgerUpdateSel.enter()
         .append('text')
         .classed('ledger', true);
       ledgerUpdateSel.each(function(ledgerVar, i) {
@@ -171,6 +173,49 @@ let View = function(controller, svg, module) {
       .style('dominant-baseline', 'middle')
       .text('Clients');
   }
+
+  let clientMenu = (clientVar, clientId) => {
+    let items = [];
+    clientVar.match({
+      Inactive: () => {
+        items.push({
+          label: 'new ledger',
+          rule: 'sendCreateLedger',
+          args: clientId,
+        });
+        model.vars.get('zooKeeper').lookup('ledgers').forEach((ledgerVar, ledgerId) => {
+          ledgerVar.lookup('state').match({
+            Open: () => {
+              items.push({
+                label: `recover L${ledgerId}`,
+                rule: 'sendRecover',
+                args: [clientId, ledgerId],
+              });
+            },
+          });
+        });
+      },
+      Writer: () => {
+        items.push({
+          label: 'append',
+          rule: 'createEntry',
+          args: clientId,
+        });
+        items.push({
+          label: 'close',
+          rule: 'sendCloseLedger',
+          args: clientId,
+        });
+      },
+    });
+    items.push({
+      label: 'reboot',
+      rule: 'rebootClient',
+      args: clientId,
+    });
+    menu.open(items);
+  }; // clientMenu
+
   let updateClients = changes => {
     let clientsData = model.vars.get('clients').map(v => v);
     let updateSel = clientsG
@@ -178,7 +223,9 @@ let View = function(controller, svg, module) {
       .data(clientsData);
     let enterSel = updateSel.enter()
       .append('g')
-      .classed('client', true);
+      .classed('client', true)
+      .classed('clickable', true)
+      .on('click', (c, i) => clientMenu(c, i + 1));
     enterSel.append('rect');
     enterSel.append('text')
       .classed('clabel', true);
