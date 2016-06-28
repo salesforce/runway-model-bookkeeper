@@ -8,6 +8,7 @@
 let d3 = require('d3');
 let _ = require('lodash');
 let Menu = require('runway-browser/lib/menu.js');
+let alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
 let View = function(controller, svg, module) {
   let model = module.env;
@@ -46,11 +47,11 @@ let View = function(controller, svg, module) {
   };
 
   let bookieBBox = id => {
-    let spacing = 50;
+    let spacing = 30;
     let bbox = {};
     bbox.y = midY + 300;
     bbox.h = 130;
-    bbox.w = 200;
+    bbox.w = 220;
     bbox.x = (midX
       - numBookies / 2 * bbox.w
       - (numBookies - 1) / 2 * spacing
@@ -93,7 +94,6 @@ let View = function(controller, svg, module) {
     updateSel.each(function(ledgerVar, i) {
       let ledgerSel = d3.select(this);
       let id = i + 1;
-      let alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
       let ensemble = ledgerVar.lookup('ensemble').map(v => alphabet[v.value - 1]);
       let lac = ledgerVar.lookup('state').match({
         Open: '',
@@ -128,10 +128,17 @@ let View = function(controller, svg, module) {
       .append('g')
       .classed('bookie', true);
     enterSel.append('rect');
+    enterSel.append('text')
+      .classed('clabel', true);
     updateSel.each(function(bookieVar, i) {
       let bookieSel = d3.select(this);
       let bookieId = i + 1;
       let bbox = bookieBBox(bookieId);
+      bookieSel.select('text.clabel')
+        .attr('x', bbox.x + bbox.w / 2)
+        .attr('y', bbox.y - 10)
+        .style('text-anchor', 'middle')
+        .text(alphabet[i]);
       bookieSel.select('rect')
         .attr('x', bbox.x)
         .attr('y', bbox.y)
@@ -156,7 +163,7 @@ let View = function(controller, svg, module) {
           .attr('x', bbox.x + 10)
           .attr('y', bbox.y + (i + 1) * (bbox.h / 2) - 10)
           .style('fill', fenced ? 'red' : 'black')
-          .text(`L${ledgerId}:${numEntries}(${lac})`);
+          .text(`L${ledgerId}:${numEntries}@${lac}`);
       });
     });
   };
