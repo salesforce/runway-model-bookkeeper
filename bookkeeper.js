@@ -6,6 +6,7 @@
 'use strict';
 
 let d3 = require('d3');
+let _ = require('lodash');
 
 let View = function(controller, svg, module) {
   let model = module.env;
@@ -88,11 +89,63 @@ let View = function(controller, svg, module) {
       .style('stroke', 'black');
   }
 
+  let messagesG = svg
+    .append('g')
+      .attr('class', 'messages');
+
+  let nodeBBox = nodeId => nodeId.match({
+    ClientNode: c => clientBBox(c.id),
+    BookieNode: b => bookieBBox(b.id),
+    ZooKeeperNode: zkBBox,
+  });
+
+  let updateMessages = changes => {
+    let messageData = model.vars.get('network').map(v => v);
+    let updateSel = messagesG
+      .selectAll('g.message')
+      .data(messageData);
+    let enterSel = updateSel.enter()
+      .append('g')
+      .classed('message', true);
+    enterSel.append('circle')
+      .attr('r', 20)
+      .style('fill', 'black');
+    updateSel.each(function(messageVar, i) {
+      let messageSel = d3.select(this);
+      let fromBBox = nodeBBox(messageVar.lookup('from'));
+      let toBBox = nodeBBox(messageVar.lookup('to'));
+      let fromPoint = {
+        x: fromBBox.x + fromBBox.w / 2,
+        y: fromBBox.y + fromBBox.h / 2,
+      };
+      let toPoint = {
+        x: toBBox.x + toBBox.w / 2,
+        y: toBBox.y + toBBox.h / 2,
+      };
+      let clock = controller.workspace.clock;
+      let sentAt = messageVar.lookup('sentAt').value;
+      let deliverAt = messageVar.lookup('deliverAt').value;
+      let frac = .7;
+      if (deliverAt > 0) {
+        frac = _.clamp((clock - sentAt) / (deliverAt - sentAt),
+                     0, 1);
+      }
+      let cx = _.round(fromPoint.x + (toPoint.x - fromPoint.x) * frac, 2);
+      let cy = _.round(fromPoint.y + (toPoint.y - fromPoint.y) * frac, 2);
+      messageSel.select('circle')
+        .attr('cx', cx)
+        .attr('cy', cy);
+    });
+    updateSel.exit().remove();
+  };
+  updateMessages(['']);
+
   return {
     bigView: true,
     wideView: true,
     name: 'BookKeeperView',
     update: function(changes) {
+      updateMessages(changes);
     },
   };
 }; // View
