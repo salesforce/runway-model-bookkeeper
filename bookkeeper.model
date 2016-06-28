@@ -55,6 +55,13 @@ type WriterBookie : record {
   retryAt : Time,
 };
 
+type RecoverBookie : record {
+  bookieId : BookieId,
+  lastEntry : MaybeIndex,
+  fenced : Boolean,
+  retryAt : Time,
+};
+
 type Client : either {
   Inactive,
   CreatingLedger,
@@ -65,9 +72,7 @@ type Client : either {
   },
   Recovering {
     ledgerId : LedgerId,
-    ensemble : Vector<BookieId>[1..5],
-    lastEntry : Vector<MaybeIndex>[1..5],
-    fenced : Vector<Boolean>[1..5],
+    ensemble : Vector<RecoverBookie>[1..5],
   },
 };
 
@@ -94,6 +99,7 @@ type Message : record {
   sentAt: Time,
   deliverAt: Time,
   payload: either {
+    // Client <-> ZooKeeper
     CreateLedgerRequest,
     CreateLedgerResponse {
       ledgerId : LedgerId,
@@ -107,8 +113,11 @@ type Message : record {
       ledgerId : LedgerId,
     },
     ReadLedgerMetaResponse {
+      ledgerId : LedgerId,
       meta : LedgerMeta,
     },
+
+    // Client <-> Bookie
     AddEntryRequest {
       ledgerId : LedgerId,
       entryId : StrictIndex,
@@ -117,6 +126,13 @@ type Message : record {
     },
     AddEntryResponse {
       status : AddEntryResponseStatus,
+    },
+    FenceLedgerRequest {
+      ledgerId : LedgerId,
+    },
+    FenceLedgerResponse {
+      ledgerId : LedgerId,
+      lastEntry : MaybeIndex,
     },
   },
 };
@@ -241,7 +257,99 @@ for clientId, client in clients {
   }
 }
 
+// A client wants to recover a particular ledger.
+external sendRecover
+for clientId, client in clients
+for ledgerId, _ in zooKeeper.ledgers {
+  match client {
+    Inactive {
+      match zooKeeper.ledgers[ledgerId].state {
+        Open {
+          client = Recovering {
+            ledgerId: ledgerId,
+          };
+          sendMessage(Message {
+            from: ClientNode { id: clientId },
+            to: ZooKeeperNode,
+            payload: ReadLedgerMetaRequest {
+              ledgerId: ledgerId,
+            },
+          });
+        }
+        default {
+          /* do nothing */
+        }
+      } // zk ledger state
+    }
+    default {
+      // do nothing
+    }
+  } // client state
+}
 
+// As part of recovery, a client fences off a ledger on a single bookie.
+rule sendFence
+for clientId, client in clients
+for bookieId, _ in bookies {
+  match client {
+    Recovering(recovering) {
+      for bookie in recovering.ensemble {
+        if bookieId == bookie.bookieId {
+          if !bookie.fenced && past(bookie.retryAt) {
+            sendMessage(Message {
+              from: ClientNode { id: clientId },
+              to: BookieNode { id: bookieId },
+              payload: FenceLedgerRequest {
+                ledgerId: recovering.ledgerId,
+              },
+            });
+            bookie.retryAt = later(50000);
+            client = recovering;
+          }
+          break;
+        }
+      }
+    }
+    default {
+      // do nothing
+    }
+  } // client state
+}
+
+// A client reports to ZooKeeper that recovery is done, closing the ledger.
+rule completeRecovery
+for clientId, client in clients {
+  match client {
+    Recovering(recovering) {
+      var count : 0..5;
+      var max : MaybeIndex;
+      for bookie in recovering.ensemble {
+        if bookie.fenced {
+          count += 1;
+          if bookie.lastEntry > max {
+            max = bookie.lastEntry;
+          }
+        }
+      }
+      if count * 2 > size(recovering.ensemble) {
+        sendMessage(Message {
+          from: ClientNode { id: clientId },
+          to: ZooKeeperNode,
+          payload: CloseLedgerRequest {
+            ledgerId: recovering.ledgerId,
+            lac: max,
+          },
+        });
+        client = Inactive;
+      }
+    }
+    default {
+      // do nothing
+    }
+  } // client state
+}
+
+// A node receives and processes a network message.
 rule handleMessage for message in network {
   if past(message.deliverAt) {
     match message.to {
@@ -285,6 +393,47 @@ rule handleMessage for message in network {
             }
           } // AddEntryResponse
 
+          ReadLedgerMetaResponse(payload) {
+            match clients[to.id] {
+              Recovering(recovering) {
+                if empty(recovering.ensemble) {
+                  match payload.meta.state {
+                    Open {
+                      for bookieId in payload.meta.ensemble {
+                        push(recovering.ensemble, RecoverBookie {
+                          bookieId: bookieId,
+                        });
+                      }
+                      clients[to.id] = recovering;
+                    }
+                    Closed {
+                      clients[to.id] = Inactive;
+                    }
+                  }
+                }
+              }
+              default { /* do nothing */ }
+            }
+          } // ReadLedgerMetaResponse
+
+          FenceLedgerResponse(payload) {
+            match clients[to.id] {
+              Recovering(recovering) {
+                if recovering.ledgerId == payload.ledgerId {
+                  for bookie in recovering.ensemble {
+                    if BookieNode { id: bookie.bookieId } == message.from {
+                      bookie.lastEntry = payload.lastEntry;
+                      bookie.fenced = True;
+                      clients[to.id] = recovering;
+                      break;
+                    }
+                  }
+                }
+              }
+              default { /* do nothing */ }
+            }
+          } // FenceLedgerResponse
+
           default { assert False; } // other message types
         }
       } // to ClientNode
@@ -326,6 +475,23 @@ rule handleMessage for message in network {
             });
           } // AddEntryRequest
 
+          FenceLedgerRequest(payload) {
+            for ledger in bookies[to.id].ledgers {
+              if ledger.id == payload.ledgerId {
+                ledger.fenced = True;
+                sendMessage(Message {
+                  from: message.to,
+                  to: message.from,
+                  payload: FenceLedgerResponse {
+                    ledgerId: payload.ledgerId,
+                    lastEntry: size(ledger.entries),
+                  },
+                });
+                break;
+              }
+            }
+          } // FenceLedgerRequest
+
           default { assert False; } // other message types
         }
       } // to BookieNode
@@ -360,6 +526,17 @@ rule handleMessage for message in network {
             };
           } // CloseLedgerRequest
 
+          ReadLedgerMetaRequest(payload) {
+            sendMessage(Message {
+              from: message.to,
+              to: message.from,
+              payload: ReadLedgerMetaResponse {
+                ledgerId: payload.ledgerId,
+                meta: zooKeeper.ledgers[payload.ledgerId],
+              },
+            });
+          } // ReadLedgerMetaRequest
+
           default { assert False; } // other message types
         }
       } // to ZooKeeperNode
@@ -367,93 +544,4 @@ rule handleMessage for message in network {
     }
     remove(network, message);
   }
-}
-
-external startRecovery
-for client in clients
-for ledgerId, _ in zooKeeper.ledgers {
-  match client {
-    Inactive {
-      match zooKeeper.ledgers[ledgerId].state {
-        Open {
-          var clientEnsemble : Vector<BookieId>[1..5];
-          var lastEntry : Vector<MaybeIndex>[1..5];
-          var fenced : Vector<Boolean>[1..5];
-          for bookieId in zooKeeper.ledgers[ledgerId].ensemble {
-            push(clientEnsemble, bookieId);
-            push(lastEntry, 0);
-            push(fenced, False);
-          }
-          client = Recovering {
-            ledgerId: ledgerId,
-            ensemble: clientEnsemble,
-            lastEntry: lastEntry,
-            fenced: fenced,
-          };
-        }
-        default {
-          /* do nothing */
-        }
-      } // zk ledger state
-    }
-    default {
-      // do nothing
-    }
-  } // client state
-}
-
-rule fence
-for client in clients
-for bookieId, _ in bookies {
-  match client {
-    Recovering(recovering) {
-      for i, bookieId2 in recovering.ensemble {
-        if bookieId != bookieId2 {
-          continue;
-        }
-        if recovering.fenced[i] {
-          break;
-        }
-        for ledger in bookies[bookieId].ledgers {
-          if ledger.id == recovering.ledgerId {
-            ledger.fenced = True;
-            recovering.lastEntry[i] = size(ledger.entries);
-            recovering.fenced[i] = True;
-            client = recovering;
-            break;
-          }
-        }
-      }
-    }
-    default {
-      // do nothing
-    }
-  } // client state
-}
-
-rule completeRecovery
-for client in clients {
-  match client {
-    Recovering(recovering) {
-      var count : 0..5;
-      var max : MaybeIndex;
-      for i, bookieId in recovering.ensemble {
-        if recovering.fenced[i] {
-          count += 1;
-          if recovering.lastEntry[i] > max {
-            max = recovering.lastEntry[i];
-          }
-        }
-      }
-      if count * 2 > size(recovering.ensemble) {
-        zooKeeper.ledgers[recovering.ledgerId].state = Closed {
-          lac: max,
-        };
-        client = Inactive;
-      }
-    }
-    default {
-      // do nothing
-    }
-  } // client state
 }
