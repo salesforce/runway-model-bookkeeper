@@ -163,7 +163,7 @@ let View = function(controller, svg, module) {
         Inactive: defaults,
         CreatingLedger: defaults,
         Writer: writer => {
-          let lac = model.functions.get('calculateLACWriter').evaluate(
+          let lac = model.functions.get('calculateLAC').evaluate(
             [writer.lookup('ensemble')], model, [], {}).value;
           let numEntries = writer.lookup('numEntries').value;
           rect.style('stroke-width', '10');

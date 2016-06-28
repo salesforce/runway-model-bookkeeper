@@ -143,36 +143,32 @@ var network : MultiSet<Message>[0..20];
 
 ////////// Functions //////////
 
+// Adds a message to the network with a randomized delivery time.
 function sendMessage(message: Message) {
   message.sentAt = later(0);
   message.deliverAt = later(urandomRange(10000, 20000));
   push(network, message);
 }
 
-function calculateLAC(lastEntry : Vector<MaybeIndex>[EnsembleIdx]) -> MaybeIndex {
+// Computes a writer client's last-add-confirmed: the largest numbered entry
+// stored by a majority of its ensemble.
+function calculateLAC(ensemble : Vector<WriterBookie>[EnsembleIdx]) -> MaybeIndex {
   var lac : MaybeIndex = 0;
-  for index in lastEntry {
+  for bookie in ensemble {
     var count : 0..5;
-    for index2 in lastEntry {
-      if index2 >= index {
+    for bookie2 in ensemble {
+      if bookie2.lastEntry >= bookie.lastEntry {
         count += 1;
       }
     }
-    if count * 2 > size(lastEntry) && index > lac {
-      lac = index;
+    if count * 2 > size(ensemble) && bookie.lastEntry > lac {
+      lac = bookie.lastEntry;
     }
   }
   return lac;
 }
 
-function calculateLACWriter(writerBookies : Vector<WriterBookie>[EnsembleIdx]) -> MaybeIndex {
-  var lastEntry : Vector<MaybeIndex>[EnsembleIdx];
-  for bookie in writerBookies {
-    push(lastEntry, bookie.lastEntry);
-  }
-  return calculateLAC(lastEntry);
-}
-
+// Returns bookie IDs in round-robin order.
 function bookieGen() -> BookieId {
   var next : BookieId = zooKeeper.nextBookie;
   if next == size(bookies) {
@@ -231,7 +227,7 @@ for bookieId, _ in bookies {
               payload: AddEntryRequest {
                 ledgerId: writer.ledgerId,
                 entryId: bookie.lastEntry + 1,
-                lac: calculateLACWriter(writer.ensemble),
+                lac: calculateLAC(writer.ensemble),
                 recovery: False,
               },
             });
@@ -258,7 +254,7 @@ for clientId, client in clients {
         to: ZooKeeperNode,
         payload: CloseLedgerRequest {
           ledgerId: writer.ledgerId,
-          lac: calculateLACWriter(writer.ensemble),
+          lac: calculateLAC(writer.ensemble),
         },
       });
       client = Inactive;
