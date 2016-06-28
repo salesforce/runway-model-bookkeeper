@@ -31,7 +31,7 @@ let View = function(controller, svg, module) {
   })();
 
   let clientBBox = id => {
-    let spacing = 100;
+    let spacing = 150;
     let bbox = {};
     bbox.y = midY;
     bbox.h = 100;
@@ -44,7 +44,7 @@ let View = function(controller, svg, module) {
   };
 
   let bookieBBox = id => {
-    let spacing = 100;
+    let spacing = 150;
     let bbox = {};
     bbox.y = midY + 300;
     bbox.h = 100;
@@ -124,6 +124,10 @@ let View = function(controller, svg, module) {
       .append('g')
       .classed('client', true);
     enterSel.append('rect');
+    enterSel.append('text')
+      .classed('label', true);
+    enterSel.append('text')
+      .classed('inner', true);
     updateSel.each(function(clientVar, i) {
       let clientSel = d3.select(this);
       let id = i + 1;
@@ -142,7 +146,22 @@ let View = function(controller, svg, module) {
         .style('stroke', 'black')
         .style('stroke-width', 'inherit')
         .style('stroke-dasharray', 'none');
+      let label = clientSel.select('text.label')
+        .attr('x', bbox.x + bbox.w / 2)
+        .attr('y', bbox.y - 10)
+        .style('text-anchor', 'middle');
+      let inner = clientSel.select('text.inner')
+        .attr('x', bbox.x + bbox.w / 2)
+        .attr('y', bbox.y + bbox.h / 2)
+        .style('text-anchor', 'middle')
+        .style('dominant-baseline', 'middle');
+      let defaults = function() {
+        label.text('');
+        inner.text('');
+      };
       clientVar.match({
+        Inactive: defaults,
+        CreatingLedger: defaults,
         Writer: writer => {
           let lac = model.functions.get('calculateLACWriter').evaluate(
             [writer.lookup('ensemble')], model, [], {}).value;
@@ -151,7 +170,13 @@ let View = function(controller, svg, module) {
           if (numEntries > lac) {
             rect.style('stroke-dasharray', '20, 15');
           }
+          label.text(`Writer(L${writer.lookup('ledgerId')})`);
+          inner.text(`${writer.lookup('numEntries')}`);
         },
+        Recovering: recover => {
+          label.text(`Recover(L${recover.lookup('ledgerId')})`);
+          inner.text('');
+        }
       });
     });
   };
