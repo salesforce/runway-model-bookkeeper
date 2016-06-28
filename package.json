@@ -16,6 +16,9 @@
       "id": "bookkeeper",
       "label": "BookKeeper",
       "spec": "bookkeeper.model",
+      "view": "bookkeeper.js",
+      "clock": "ms",
+      "speed": 50
     }
   ]
 }

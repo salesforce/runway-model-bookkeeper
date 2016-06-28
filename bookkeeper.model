@@ -49,13 +49,18 @@ type Bookie : record {
 
 var bookies: Array<Bookie>[BookieId];
 
+type WriterBookie : record {
+  bookieId : BookieId,
+  lastEntry : MaybeIndex,
+  retryAt : Time,
+};
+
 type Client : either {
   Inactive,
   CreatingLedger,
   Writer {
     ledgerId : LedgerId,
-    ensemble : Vector<BookieId>[1..5],
-    lastEntry : Vector<MaybeIndex>[1..5],
+    ensemble : Vector<WriterBookie>[1..5],
     numEntries : MaybeIndex,
   },
   Recovering {
@@ -126,7 +131,7 @@ function sendMessage(message: Message) {
   push(network, message);
 }
 
-function calculateLAC(lastEntry: Vector<MaybeIndex>[1..5]) -> MaybeIndex {
+function calculateLAC(lastEntry : Vector<MaybeIndex>[1..5]) -> MaybeIndex {
   var lac : MaybeIndex = 0;
   for index in lastEntry {
     var count : 0..5;
@@ -142,10 +147,18 @@ function calculateLAC(lastEntry: Vector<MaybeIndex>[1..5]) -> MaybeIndex {
   return lac;
 }
 
+function calculateLACWriter(writerBookies : Vector<WriterBookie>[1..5]) -> MaybeIndex {
+  var lastEntry : Vector<MaybeIndex>[1..5];
+  for bookie in writerBookies {
+    push(lastEntry, bookie.lastEntry);
+  }
+  return calculateLAC(lastEntry);
+}
+
 ////////// Rules //////////
 
 // A client requests ZooKeeper to create a new ledger.
-rule sendCreateLedger for clientId, client in clients {
+external sendCreateLedger for clientId, client in clients {
   match client {
     Inactive {
       client = CreatingLedger;
@@ -162,7 +175,7 @@ rule sendCreateLedger for clientId, client in clients {
 }
 
 // A client creates a new entry locally, to be replicated later.
-rule createEntry
+external createEntry
 for client in clients {
   match client {
     Writer(writer) {
@@ -181,19 +194,21 @@ for clientId, client in clients
 for bookieId, _ in bookies {
   match client {
     Writer(writer) {
-      for i, bookieId2 in writer.ensemble {
-        if bookieId == bookieId2 {
-          if writer.lastEntry[i] < writer.numEntries {
+      for bookie in writer.ensemble {
+        if bookie.bookieId == bookieId {
+          if bookie.lastEntry < writer.numEntries && past(bookie.retryAt) {
             sendMessage(Message {
               from: ClientNode { id: clientId },
               to: BookieNode { id: bookieId },
               payload: AddEntryRequest {
                 ledgerId: writer.ledgerId,
-                entryId: writer.lastEntry[i] + 1,
-                lac: calculateLAC(writer.lastEntry),
+                entryId: bookie.lastEntry + 1,
+                lac: calculateLACWriter(writer.ensemble),
                 recovery: False,
               },
             });
+            bookie.retryAt = later(50000);
+            client = writer;
           }
           break;
         }
@@ -206,7 +221,7 @@ for bookieId, _ in bookies {
 }
 
 // A writer stops writing and closes its own ledger in ZooKeeper.
-rule sendCloseLedger
+external sendCloseLedger
 for clientId, client in clients {
   match client {
     Writer(writer) {
@@ -215,7 +230,7 @@ for clientId, client in clients {
         to: ZooKeeperNode,
         payload: CloseLedgerRequest {
           ledgerId: writer.ledgerId,
-          lac: calculateLAC(writer.lastEntry),
+          lac: calculateLACWriter(writer.ensemble),
         },
       });
       client = Inactive;
@@ -235,16 +250,15 @@ rule handleMessage for message in network {
         match message.payload {
 
           CreateLedgerResponse(payload) {
-            var ensemble : Vector<BookieId>[1..5];
-            var lastEntry : Vector<MaybeIndex>[1..5];
+            var ensemble : Vector<WriterBookie>[1..5];
             for bookieId in payload.ensemble {
-              push(ensemble, bookieId);
-              push(lastEntry, 0);
+              push(ensemble, WriterBookie {
+                bookieId: bookieId,
+              });
             }
             clients[to.id] = Writer {
               ledgerId: payload.ledgerId,
               ensemble: ensemble,
-              lastEntry: lastEntry,
             };
           } // CreateLedgerResponse
 
@@ -253,9 +267,10 @@ rule handleMessage for message in network {
               Writer(writer) {
                 match payload.status {
                   AddEntryOk {
-                    for i, bookieId in writer.ensemble {
-                      if BookieNode { id: bookieId } == message.from {
-                        writer.lastEntry[i] += 1;
+                    for bookie in writer.ensemble {
+                      if BookieNode { id: bookie.bookieId } == message.from {
+                        bookie.lastEntry += 1;
+                        bookie.retryAt = 0;
                         clients[to.id] = writer;
                         break;
                       }
@@ -354,7 +369,7 @@ rule handleMessage for message in network {
   }
 }
 
-rule startRecovery
+external startRecovery
 for client in clients
 for ledgerId, _ in zooKeeper.ledgers {
   match client {
