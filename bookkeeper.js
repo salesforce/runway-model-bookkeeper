@@ -16,7 +16,7 @@ let View = function(controller, svg, module) {
     .style('font-size', 60)
     .append('g');
 
-  let midX = 600;
+  let midX = 900;
   let midY = 500;
   let numClients = model.vars.get('clients').size();
   let numBookies = model.vars.get('bookies').size();

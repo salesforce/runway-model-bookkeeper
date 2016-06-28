@@ -11,9 +11,10 @@ type NextIndex : 1..10;
 
 type LedgerId : 1..3;
 type ClientId : 1..2;
-type BookieId : 1..3;
+type BookieId : 1..5;
 
-type Ensemble : Set<BookieId>[1..5];
+type EnsembleIdx : 1..3;
+type Ensemble : Set<BookieId>[EnsembleIdx];
 
 type LedgerMeta : record {
   state : either {
@@ -27,6 +28,7 @@ type LedgerMeta : record {
 
 type ZooKeeper : record {
   ledgers : Vector<LedgerMeta>[LedgerId],
+  nextBookie : BookieId,
 };
 
 var zooKeeper : ZooKeeper;
@@ -67,12 +69,12 @@ type Client : either {
   CreatingLedger,
   Writer {
     ledgerId : LedgerId,
-    ensemble : Vector<WriterBookie>[1..5],
+    ensemble : Vector<WriterBookie>[EnsembleIdx],
     numEntries : MaybeIndex,
   },
   Recovering {
     ledgerId : LedgerId,
-    ensemble : Vector<RecoverBookie>[1..5],
+    ensemble : Vector<RecoverBookie>[EnsembleIdx],
   },
 };
 
@@ -147,7 +149,7 @@ function sendMessage(message: Message) {
   push(network, message);
 }
 
-function calculateLAC(lastEntry : Vector<MaybeIndex>[1..5]) -> MaybeIndex {
+function calculateLAC(lastEntry : Vector<MaybeIndex>[EnsembleIdx]) -> MaybeIndex {
   var lac : MaybeIndex = 0;
   for index in lastEntry {
     var count : 0..5;
@@ -163,12 +165,22 @@ function calculateLAC(lastEntry : Vector<MaybeIndex>[1..5]) -> MaybeIndex {
   return lac;
 }
 
-function calculateLACWriter(writerBookies : Vector<WriterBookie>[1..5]) -> MaybeIndex {
-  var lastEntry : Vector<MaybeIndex>[1..5];
+function calculateLACWriter(writerBookies : Vector<WriterBookie>[EnsembleIdx]) -> MaybeIndex {
+  var lastEntry : Vector<MaybeIndex>[EnsembleIdx];
   for bookie in writerBookies {
     push(lastEntry, bookie.lastEntry);
   }
   return calculateLAC(lastEntry);
+}
+
+function bookieGen() -> BookieId {
+  var next : BookieId = zooKeeper.nextBookie;
+  if next == size(bookies) {
+    zooKeeper.nextBookie = 1;
+  } else {
+    zooKeeper.nextBookie += 1;
+  }
+  return next;
 }
 
 ////////// Rules //////////
@@ -502,9 +514,9 @@ rule handleMessage for message in network {
           CreateLedgerRequest {
             if !full(zooKeeper.ledgers) {
               var ensemble : Ensemble;
-              push(ensemble, 1);
-              push(ensemble, 2);
-              push(ensemble, 3);
+              push(ensemble, bookieGen());
+              push(ensemble, bookieGen());
+              push(ensemble, bookieGen());
               push(zooKeeper.ledgers, LedgerMeta{
                 ensemble: ensemble,
               });
