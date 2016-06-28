@@ -16,7 +16,7 @@ let View = function(controller, svg, module) {
     .style('font-size', 60)
     .append('g');
 
-  let midX = 500;
+  let midX = 600;
   let midY = 500;
   let numClients = model.vars.get('clients').size();
   let numBookies = model.vars.get('bookies').size();
@@ -65,6 +65,12 @@ let View = function(controller, svg, module) {
       .attr('height', bbox.h)
       .style('fill', 'blue')
       .style('stroke', 'black');
+    svg.append('text')
+      .attr('x', bbox.x - 50)
+      .attr('y', bbox.y + bbox.h / 2)
+      .style('text-anchor', 'end')
+      .style('dominant-baseline', 'middle')
+      .text('ZooKeeper');
   }
 
   for (let id = 1; id <= numBookies; ++id) {
@@ -76,11 +82,28 @@ let View = function(controller, svg, module) {
       .attr('height', bbox.h)
       .style('fill', 'orange')
       .style('stroke', 'black');
+    if (id == 1) {
+      svg.append('text')
+        .attr('x', bbox.x - 50)
+        .attr('y', bbox.y + bbox.h / 2)
+        .style('text-anchor', 'end')
+        .style('dominant-baseline', 'middle')
+        .text('Bookies');
+    }
   }
 
   let clientsG = svg
     .append('g')
       .attr('class', 'clients');
+  {
+    let bbox = clientBBox(1);
+    clientsG.append('text')
+      .attr('x', bbox.x - 50)
+      .attr('y', bbox.y + bbox.h / 2)
+      .style('text-anchor', 'end')
+      .style('dominant-baseline', 'middle')
+      .text('Clients');
+  }
 
   let messagesG = svg
     .append('g')
